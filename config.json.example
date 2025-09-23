@@ -1,0 +1,36 @@
+{
+  "database_path": "insider_trading_bot.db",
+  "sec_check_interval": 300,
+  "max_daily_trades": 10,
+  "max_position_per_trade": 0.05,
+  "dry_run": true,
+  "user_agent": "YourCompany contact@yourcompany.com",
+  "market_open_delay": 15,
+  "end_of_day_exit": true,
+  "close_on_shutdown": false,
+
+  "strategy_config": {
+    "earnings_season_volume_min": 30000000,
+    "earnings_season_volume_max": 100000000,
+    "year_round_volume_min": 30000000,
+    "year_round_volume_max": 10000000000,
+    "earnings_season_atr_min": 3.5,
+    "year_round_atr_min": 7.0,
+    "year_round_atr_max": 20.0,
+    "min_transaction_value": 50000,
+    "large_transaction_value": 100000,
+    "multi_insider_window_hours": 24,
+    "repeat_purchase_window_days": 30,
+    "buy_threshold": 5,
+    "high_conviction_threshold": 7,
+    "spy_gap_threshold": 0.5
+  },
+
+  "risk_management": {
+    "earnings_season_stop_loss_atr": 0.5,
+    "year_round_stop_loss_atr": 1.5,
+    "earnings_season_take_profit_atr": 1.0,
+    "max_portfolio_risk": 0.20,
+    "position_sizing_method": "score_based"
+  }
+}
