@@ -410,10 +410,11 @@ class StrategyEngine:
                 # Convert dict to InsiderFiling object
                 filing = InsiderFiling(**filing_data)
 
-                # Get market data
-                market_data = self.trader.get_market_data(filing.company_symbol)
+                # Get market data for the filing date (or current if filing is recent)
+                filing_date = filing.filing_date  # Use filing date for historical accuracy
+                market_data = self.trader.get_market_data(filing.company_symbol, target_date=filing_date)
                 if not market_data:
-                    self.logger.warning(f"No market data for {filing.company_symbol}, skipping")
+                    self.logger.warning(f"No market data for {filing.company_symbol} on {filing_date}, skipping")
                     continue
 
                 # Analyze filing

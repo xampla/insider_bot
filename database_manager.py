@@ -281,6 +281,37 @@ class DatabaseManager:
             self.logger.error(f"Error storing market data: {e}")
             return False
 
+    def get_market_data(self, symbol: str, date: str) -> Optional[MarketData]:
+        """Retrieve market data for specific symbol and date"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT symbol, date, open_price, high_price, low_price, close_price,
+                           volume, atr_14, avg_volume_30
+                    FROM market_data
+                    WHERE symbol = ? AND date = ?
+                """, (symbol, date))
+
+                row = cursor.fetchone()
+                if row:
+                    return MarketData(
+                        symbol=row[0],
+                        date=row[1],
+                        open_price=row[2],
+                        high_price=row[3],
+                        low_price=row[4],
+                        close_price=row[5],
+                        volume=row[6],
+                        atr_14=row[7],
+                        avg_volume_30=row[8]
+                    )
+                return None
+
+        except sqlite3.Error as e:
+            self.logger.error(f"Error retrieving market data: {e}")
+            return None
+
     def store_strategy_score(self, score: StrategyScore) -> bool:
         """Store strategy scoring results"""
         try:
@@ -532,6 +563,82 @@ class DatabaseManager:
     def _get_connection(self):
         """Get database connection (for analysis module)"""
         return sqlite3.connect(self.db_path)
+
+    def clean_database(self) -> Dict[str, int]:
+        """
+        Clean all data from the database for fresh start
+
+        Returns:
+            Dictionary with counts of deleted records by table
+        """
+        try:
+            self.logger.info("🧹 Cleaning database...")
+
+            # Get current state before cleaning
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Get counts before deletion
+                cursor.execute("SELECT COUNT(*) FROM insider_filings")
+                filings_count = cursor.fetchone()[0]
+
+                cursor.execute("SELECT COUNT(*) FROM strategy_scores")
+                scores_count = cursor.fetchone()[0]
+
+                cursor.execute("SELECT COUNT(*) FROM market_data")
+                market_count = cursor.fetchone()[0]
+
+                cursor.execute("SELECT COUNT(*) FROM spy_conditions")
+                spy_count = cursor.fetchone()[0]
+
+            self.logger.info(f"   Current state: {filings_count} filings, {scores_count} scores, {market_count} market data, {spy_count} SPY conditions")
+
+            # Clean all filing data but preserve schema
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Clean insider filings (main data)
+                cursor.execute("DELETE FROM insider_filings")
+                filings_deleted = cursor.rowcount
+
+                # Clean associated data that depends on filings
+                cursor.execute("DELETE FROM strategy_scores")
+                scores_deleted = cursor.rowcount
+
+                # Optionally clean trade records (keeping for audit trail by default)
+                # cursor.execute("DELETE FROM trade_records")
+
+                # Clean market data cache (will be rebuilt)
+                cursor.execute("DELETE FROM market_data")
+                market_deleted = cursor.rowcount
+
+                # Clean SPY conditions cache (will be rebuilt)
+                cursor.execute("DELETE FROM spy_conditions")
+                spy_deleted = cursor.rowcount
+
+            # Optimize database (VACUUM must be outside transaction)
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("VACUUM")
+
+            results = {
+                'filings_deleted': filings_deleted,
+                'scores_deleted': scores_deleted,
+                'market_deleted': market_deleted,
+                'spy_deleted': spy_deleted
+            }
+
+            self.logger.info(f"✅ Database cleaned successfully:")
+            self.logger.info(f"   📊 Filings deleted: {filings_deleted}")
+            self.logger.info(f"   🎯 Strategy scores deleted: {scores_deleted}")
+            self.logger.info(f"   📈 Market data deleted: {market_deleted}")
+            self.logger.info(f"   🔍 SPY conditions deleted: {spy_deleted}")
+            self.logger.info(f"   💾 Database optimized with VACUUM")
+
+            return results
+
+        except sqlite3.Error as e:
+            self.logger.error(f"Error cleaning database: {e}")
+            raise
 
     def close(self):
         """Close database connections (if any persistent connections)"""

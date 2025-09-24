@@ -130,7 +130,6 @@ class InsiderTradingBot:
             # Initialize Telegram notifier
             self.telegram_notifier = TelegramNotifier()
             if self.telegram_notifier.enabled:
-                self.telegram_notifier.notify_system_status("started")
                 self.logger.info("Telegram notifier initialized")
             else:
                 self.logger.info("Telegram notifier disabled (no credentials)")
@@ -227,21 +226,46 @@ class InsiderTradingBot:
             self.logger.error(f"Error in strategy analysis: {e}")
 
     def execute_trades(self):
-        """Execute trades based on buy signals"""
+        """Execute trades based on buy signals with WSV timing strategy"""
         try:
             # Check if we're in dry run mode
             if self.config['dry_run']:
                 self.logger.info("DRY RUN MODE - No actual trades will be executed")
 
-            # Check if market is open
-            if not self.trader.is_market_open():
-                self.logger.info("Market is closed - skipping trade execution")
-                return
+            # 🕘 WSV TIMING STRATEGY: Execute queued trades first (if market is open)
+            # This handles trades detected after hours that were queued for market open
+            if self.trader.is_market_open():
+                self.logger.info("🚀 Checking for queued trades to execute at market open...")
+                queue_results = self.trader.execute_queued_trades()
 
-            # Check daily trade limit
-            if self.daily_trade_count >= self.config['max_daily_trades']:
-                self.logger.info(f"Daily trade limit reached ({self.daily_trade_count})")
-                return
+                if queue_results['trades_executed'] > 0:
+                    self.daily_trade_count += queue_results['trades_executed']
+                    self.logger.info(f"✅ Executed {queue_results['trades_executed']} queued trades")
+                elif queue_results.get('queued_count', 0) > 0:
+                    self.logger.info(f"ℹ️ {queue_results['queued_count']} trades still queued: {queue_results['reason']}")
+
+            # Check daily trade limit with cluster exception
+            # Allow +3 extra trades for cluster signals (strong conviction signals)
+            max_trades = self.config['max_daily_trades']
+            cluster_extra_limit = 3
+
+            if self.daily_trade_count >= max_trades:
+                # Check if we have any cluster trades to process that could use the extra allowance
+                remaining_signals = self.strategy_engine.get_buy_signals()
+                cluster_signals_count = 0
+
+                for check_signal in remaining_signals:
+                    if self._check_insider_cluster_buy(check_signal['symbol'], check_signal.get('analysis_date')):
+                        cluster_signals_count += 1
+
+                # Allow up to +3 extra if we have cluster signals
+                effective_limit = max_trades + min(cluster_signals_count, cluster_extra_limit)
+
+                if self.daily_trade_count >= effective_limit:
+                    self.logger.info(f"Daily trade limit reached ({self.daily_trade_count}/{effective_limit}) - including cluster exceptions")
+                    return
+                else:
+                    self.logger.info(f"📊 Using cluster exception: {self.daily_trade_count}/{effective_limit} trades (base: {max_trades} + cluster: {effective_limit - max_trades})")
 
             # Get buy signals for today
             buy_signals = self.strategy_engine.get_buy_signals()
@@ -256,7 +280,83 @@ class InsiderTradingBot:
                 try:
                     symbol = signal['symbol']
                     filing_id = signal['filing_id']
-                    strategy_score = signal['total_score']
+                    base_strategy_score = signal['total_score']
+
+                    # Check if this specific signal qualifies for cluster exception
+                    cluster_details = self._get_insider_cluster_details(symbol, signal.get('analysis_date'))
+                    is_cluster_signal = cluster_details['is_cluster']
+
+                    # Additional check for daily trade limit per individual trade
+                    # Regular limit: max_daily_trades, Cluster exception: +3 extra
+                    effective_max_trades = self.config['max_daily_trades']
+                    if is_cluster_signal:
+                        effective_max_trades += cluster_extra_limit
+
+                    if self.daily_trade_count >= effective_max_trades:
+                        if is_cluster_signal:
+                            self.logger.info(f"⏭️ Skipping {symbol}: Cluster exception limit reached ({self.daily_trade_count}/{effective_max_trades})")
+                        else:
+                            self.logger.info(f"⏭️ Skipping {symbol}: Daily limit reached ({self.daily_trade_count}/{self.config['max_daily_trades']})")
+                        continue
+
+                    # 🧑‍💼 INSIDER ROLE WEIGHTING enhancement
+                    # Apply academic research-based role adjustments to strategy score
+                    strategy_score = self.trader.apply_insider_role_weighting(
+                        base_strategy_score, signal
+                    )
+
+                    if strategy_score != base_strategy_score:
+                        self.logger.info(f"🎯 Enhanced scoring for {symbol}: {base_strategy_score} → {strategy_score}")
+
+                    # 🚫 DIRECTOR-ONLY SIGNAL EXCLUSION
+                    # Skip weak director-only signals with small transaction sizes
+                    if self.trader.should_exclude_director_only_signal(signal):
+                        self.logger.info(f"⏭️ Skipping {symbol}: Director-only signal with small transaction size")
+                        continue
+
+                    # 🕘 WSV TIMING STRATEGY: Check trading window and decide action
+                    # Determine whether to execute now or queue for next market open
+                    trading_window = self.trader.get_trading_window_status()
+                    should_execute_now = trading_window['recommended_action'] == 'TRADE_NOW'
+
+                    if not should_execute_now:
+                        # Queue trade for next market open (WSV strategy)
+                        self.logger.info(f"🕘 {symbol}: {trading_window['reason']}")
+
+                        queued_success = self.trader.queue_trade_for_next_open(
+                            signal_data=signal,
+                            enhanced_strategy_score=strategy_score,
+                            has_insider_cluster=is_cluster_signal
+                        )
+
+                        if queued_success:
+                            self.logger.info(f"📋 {symbol}: Queued for execution at {trading_window.get('next_open', 'next market open')}")
+                        else:
+                            self.logger.error(f"❌ {symbol}: Failed to queue trade")
+
+                        continue  # Skip to next signal
+                    else:
+                        self.logger.info(f"🚀 {symbol}: Market open - executing immediately")
+
+                    # 🧭 ENHANCED SPY MARKET FILTER with tier-based exceptions
+                    # Use already-calculated cluster status
+                    has_insider_cluster = is_cluster_signal
+
+                    spy_condition = self.trader.get_enhanced_spy_condition(
+                        symbol=symbol,
+                        has_insider_cluster=has_insider_cluster
+                    )
+
+                    if not spy_condition['trading_allowed']:
+                        self.logger.info(f"❌ SPY Filter: Skipping {symbol} - {spy_condition['reason']}")
+                        continue
+                    elif spy_condition.get('exception_applied'):
+                        self.logger.info(f"✅ SPY Exception: Trading {symbol} - {spy_condition['reason']}")
+
+                    # Extract SPY risk multiplier from graduated filter
+                    spy_risk_multiplier = spy_condition.get('risk_multiplier', 1.0)
+                    if spy_risk_multiplier < 1.0:
+                        self.logger.info(f"📊 SPY Risk Adjustment: {symbol} - Risk reduced to {spy_risk_multiplier*100:.0f}% due to {spy_condition['reason']}")
 
                     # Get current market data
                     market_data = self.trader.get_market_data(symbol)
@@ -264,19 +364,63 @@ class InsiderTradingBot:
                         self.logger.warning(f"No market data for {symbol}, skipping")
                         continue
 
-                    # Calculate position size
+                    # Calculate position size using enhanced risk-first approach
+                    # UNIFIED STOP VARIANT LOGIC (fixed take-profit inconsistency)
+                    # High conviction (≥7): 50% ATR stop, no TP, EOD exit
+                    # Medium conviction (6-7): 50% ATR stop, 150% ATR TP
+                    # Low conviction (<6): 150% ATR stop, 100% ATR TP
+                    if strategy_score >= 6:
+                        stop_variant = 1  # 50% ATR stop (for both high and medium conviction)
+                    else:
+                        stop_variant = 2  # 150% ATR stop (for low conviction only)
+
+                    # 🧪 TIER 4 SAFETY CAPS - Prevent portfolio creep into high-risk small caps
+                    tier_risk_multiplier = self._get_tier_risk_multiplier(symbol)
+                    if tier_risk_multiplier < 1.0:  # Tier 4 detected
+                        # Force Tier 4 to always use wide stops (Variant 2) regardless of conviction
+                        # Small caps are volatile - need buffer against whipsaws
+                        if stop_variant == 1:
+                            stop_variant = 2
+                            self.logger.info(f"🔴 Tier 4 Override: Forcing {symbol} to use Variant 2 (150% ATR) for volatility buffer")
+
+                        # Check concurrency limits for Tier 4 trades
+                        tier4_limits_ok, limit_reason = self._check_tier4_limits(symbol)
+                        if not tier4_limits_ok:
+                            self.logger.info(f"🚫 Tier 4 Safety Cap: Skipping {symbol} - {limit_reason}")
+                            continue
+
+                        self.logger.info(f"🔴 Tier 4 approved: {symbol} - Risk reduced to {tier_risk_multiplier*100:.0f}%")
+
+                    # 🏭 SECTOR CONCENTRATION LIMITS - Prevent sector concentration risk
+                    # Max 1 high conviction position per sector at any time
+                    if not self.trader.check_sector_concentration_limits(symbol, strategy_score):
+                        self.logger.info(f"⏭️ Skipping {symbol}: Sector concentration limit (max 1 high conviction per sector)")
+                        continue
+
                     shares = self.trader.calculate_position_size(
-                        symbol, strategy_score, market_data.close_price
+                        symbol, strategy_score, market_data.close_price, market_data, stop_variant, cluster_details
                     )
+
+                    # Apply combined risk adjustments: SPY filter × Tier 4 multiplier
+                    combined_risk_multiplier = spy_risk_multiplier * tier_risk_multiplier
+                    if combined_risk_multiplier < 1.0:
+                        shares = int(shares * combined_risk_multiplier)
+                        adjustment_reasons = []
+                        if spy_risk_multiplier < 1.0:
+                            adjustment_reasons.append(f"SPY: {spy_risk_multiplier*100:.0f}%")
+                        if tier_risk_multiplier < 1.0:
+                            adjustment_reasons.append(f"Tier 4: {tier_risk_multiplier*100:.0f}%")
+                        self.logger.info(f"📉 Combined risk adjustment: {symbol} position reduced to {shares} shares ({', '.join(adjustment_reasons)})")
 
                     if shares <= 0:
                         self.logger.warning(f"Invalid position size for {symbol}, skipping")
                         continue
 
-                    # Execute trade
+                    # Execute trade with enhanced PDF-compliant strategy
+                    # Note: take_profit_variant is now determined automatically by strategy_score
                     if not self.config['dry_run']:
                         trade_record = self.trader.place_buy_order(
-                            symbol, shares, strategy_score, filing_id
+                            symbol, shares, strategy_score, filing_id, stop_variant
                         )
 
                         if trade_record:
@@ -294,6 +438,173 @@ class InsiderTradingBot:
 
         except Exception as e:
             self.logger.error(f"Error in trade execution: {e}")
+
+    def _check_insider_cluster_buy(self, symbol: str, analysis_date: str = None) -> bool:
+        """
+        Check if there's an insider cluster buy (≥2 insiders same day)
+        This is used for Tier 3/4 SPY filter exceptions
+
+        Args:
+            symbol: Company symbol
+            analysis_date: Date to check (default: today)
+
+        Returns:
+            True if insider cluster buy detected
+        """
+        cluster_info = self._get_insider_cluster_details(symbol, analysis_date)
+        return cluster_info['is_cluster']
+
+    def _get_insider_cluster_details(self, symbol: str, analysis_date: str = None) -> dict:
+        """
+        Get detailed insider cluster information for advanced risk calculations
+
+        Args:
+            symbol: Company symbol
+            analysis_date: Date to check (default: today)
+
+        Returns:
+            Dict with cluster details: {is_cluster, insider_count, insiders_list}
+        """
+        try:
+            if not analysis_date:
+                analysis_date = datetime.now().strftime('%Y-%m-%d')
+
+            # Get recent insider purchases for this symbol
+            recent_purchases = self.db_manager.get_recent_insider_purchases(symbol, days=1)
+
+            # Filter for purchases on the analysis date
+            same_day_purchases = [
+                purchase for purchase in recent_purchases
+                if purchase['transaction_date'] == analysis_date
+            ]
+
+            # Count unique insiders (avoid double counting same insider)
+            unique_insiders = set(purchase['insider_name'] for purchase in same_day_purchases)
+            insider_count = len(unique_insiders)
+            is_cluster = insider_count >= 2
+
+            if is_cluster:
+                self.logger.info(f"🎯 Insider cluster detected for {symbol}: {insider_count} insiders on {analysis_date}")
+                for insider in unique_insiders:
+                    self.logger.info(f"   - {insider}")
+
+            return {
+                'is_cluster': is_cluster,
+                'insider_count': insider_count,
+                'insiders_list': list(unique_insiders),
+                'analysis_date': analysis_date
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error checking insider cluster for {symbol}: {e}")
+            return {
+                'is_cluster': False,
+                'insider_count': 0,
+                'insiders_list': [],
+                'analysis_date': analysis_date or datetime.now().strftime('%Y-%m-%d')
+            }
+
+    def _get_tier_risk_multiplier(self, symbol: str) -> float:
+        """
+        Get risk multiplier for different company tiers
+        Tier 4 companies get reduced risk allocation
+
+        Args:
+            symbol: Company symbol
+
+        Returns:
+            Risk multiplier (0.25 for Tier 4, 1.0 for others)
+        """
+        try:
+            # Use the backfill manager's tier system if available
+            if hasattr(self, 'backfill_manager') and hasattr(self.backfill_manager, 'get_tier_risk_multiplier'):
+                return self.backfill_manager.get_tier_risk_multiplier(symbol)
+
+            # Fallback: hardcoded Tier 4 list for risk reduction
+            tier4_companies = ['PLTR', 'RBLX', 'FUBO', 'SOFI', 'OPEN', 'COIN', 'HOOD', 'LCID']
+
+            if symbol in tier4_companies:
+                return 0.25  # Reduce risk to 25% for Tier 4 (max 0.5% instead of 2%)
+            else:
+                return 1.0   # Normal risk for Tier 1-3
+
+        except Exception as e:
+            self.logger.error(f"Error getting tier risk multiplier for {symbol}: {e}")
+            return 1.0  # Default to normal risk
+
+    def _check_tier4_limits(self, symbol: str) -> Tuple[bool, str]:
+        """
+        Check Tier 4 concurrency and monthly limits to prevent portfolio creep
+
+        Safety Rules:
+        - Max 1 Tier 4 trade open at any time
+        - Optional: Max 5 Tier 4 trades per month
+        - Keeps Tier 4 truly "sandbox" rather than diluting portfolio
+
+        Args:
+            symbol: Company symbol to check
+
+        Returns:
+            Tuple of (limits_ok, reason)
+        """
+        try:
+            from datetime import datetime, timedelta
+
+            # Define Tier 4 companies
+            tier4_companies = ['PLTR', 'RBLX', 'FUBO', 'SOFI', 'OPEN', 'COIN', 'HOOD', 'LCID']
+
+            if symbol not in tier4_companies:
+                return True, "Not a Tier 4 company"
+
+            # Check 1: Max 1 Tier 4 trade open at any time
+            open_positions = self.db_manager.get_open_positions()
+            tier4_open_count = 0
+
+            for position in open_positions:
+                position_symbol = position.get('symbol', '')
+                if position_symbol in tier4_companies:
+                    tier4_open_count += 1
+
+            if tier4_open_count >= 1:
+                return False, f"Tier 4 concurrency limit: {tier4_open_count}/1 positions already open"
+
+            # Check 2: Max 5 Tier 4 trades per month (optional strict limit)
+            current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            monthly_tier4_trades = 0
+
+            # Get trades from this month
+            try:
+                monthly_trades = self.db_manager.get_trades_in_period(
+                    start_date=current_month_start.strftime('%Y-%m-%d'),
+                    end_date=datetime.now().strftime('%Y-%m-%d')
+                )
+
+                for trade in monthly_trades:
+                    trade_symbol = trade.get('symbol', '')
+                    if trade_symbol in tier4_companies:
+                        monthly_tier4_trades += 1
+
+                # Optional stricter limit: 5 trades per month
+                MAX_TIER4_MONTHLY = 5
+                if monthly_tier4_trades >= MAX_TIER4_MONTHLY:
+                    return False, f"Tier 4 monthly limit: {monthly_tier4_trades}/{MAX_TIER4_MONTHLY} trades this month"
+
+            except Exception as e:
+                # If we can't check monthly trades, be conservative but don't block
+                self.logger.warning(f"Could not check monthly Tier 4 limits: {e}")
+
+            # All limits passed
+            self.logger.info(f"🧪 Tier 4 Limits Check for {symbol}:")
+            self.logger.info(f"   Open positions: {tier4_open_count}/1")
+            self.logger.info(f"   Monthly trades: {monthly_tier4_trades}/5")
+            self.logger.info(f"   Status: ✅ Approved")
+
+            return True, "All Tier 4 limits satisfied"
+
+        except Exception as e:
+            self.logger.error(f"Error checking Tier 4 limits for {symbol}: {e}")
+            # Be conservative: deny on error to prevent uncontrolled Tier 4 exposure
+            return False, f"Error in limit check: {e}"
 
     def manage_positions(self):
         """Manage open positions (stop losses, take profits)"""
@@ -446,6 +757,27 @@ class InsiderTradingBot:
 
         self.logger.info("Shutdown complete")
 
+    def clean_database(self):
+        """Clean all data from the database for fresh start"""
+        try:
+            # Use DatabaseManager's clean method
+            results = self.db_manager.clean_database()
+
+            print(f"""
+{'='*60}
+DATABASE CLEANED SUCCESSFULLY
+{'='*60}
+Removed {results['filings_deleted']} insider filings and associated data.
+Database is ready for fresh 60-day backfill.
+
+Run without --clean to start normal operation.
+{'='*60}
+            """)
+
+        except Exception as e:
+            self.logger.error(f"Error cleaning database: {e}")
+            raise
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Insider Trading Bot')
@@ -454,6 +786,7 @@ def main():
     parser.add_argument('--status', action='store_true', help='Print status and exit')
     parser.add_argument('--backtest', nargs=2, metavar=('start_date', 'end_date'),
                        help='Run backtest for date range (YYYY-MM-DD)')
+    parser.add_argument('--clean', action='store_true', help='Clean database and exit')
 
     args = parser.parse_args()
 
@@ -474,6 +807,11 @@ def main():
         if args.backtest:
             # Run backtest
             bot.run_backtest(args.backtest[0], args.backtest[1])
+            return
+
+        if args.clean:
+            # Clean database and exit
+            bot.clean_database()
             return
 
         # Normal operation - start scheduling
