@@ -47,7 +47,6 @@ echo
 
 # Step 1: Create necessary directories
 echo "📁 Creating directory structure..."
-mkdir -p "$BOT_DIR/logs"
 mkdir -p "$BOT_DIR/backups"
 
 # Step 2: Install Python dependencies (if venv doesn't exist)
@@ -98,22 +97,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE_NAME
 echo "✅ Service installed and enabled"
 
-# Step 5: Set up log rotation
-echo "📝 Setting up log rotation..."
-
-# Create logrotate config with substituted values
-sed -e "s|{{BOT_DIR}}|$BOT_DIR|g" \
-    -e "s|{{BOT_USER}}|$BOT_USER|g" \
-    -e "s|{{BOT_GROUP}}|$BOT_GROUP|g" \
-    "$BOT_DIR/logrotate.conf" > /tmp/insider-bot-logrotate
-
-sudo cp /tmp/insider-bot-logrotate /etc/logrotate.d/insider-bot
-echo "✅ Log rotation configured"
+# Step 5: Journal logging is handled by systemd automatically
+echo "📝 Logging configured (using systemd journal)..."
+echo "✅ Journal logging ready"
 
 # Step 6: Set correct permissions
 echo "🔒 Setting permissions..."
 chmod +x "$BOT_DIR/main.py"
-chmod 755 "$BOT_DIR/logs/"
 find "$BOT_DIR" -name "*.py" -exec chmod 644 {} \;
 find "$BOT_DIR" -name "*.sh" -exec chmod +x {} \;
 
@@ -143,15 +133,14 @@ echo "   Restart: sudo systemctl restart $SERVICE_NAME"
 echo "   Status:  sudo systemctl status $SERVICE_NAME"
 echo "   Logs:    sudo journalctl -u $SERVICE_NAME -f"
 echo
-echo "📝 Log Files:"
-echo "   Application: $BOT_DIR/insider_bot.log"
-echo "   Service:     $BOT_DIR/logs/service.log"
-echo "   System:      sudo journalctl -u $SERVICE_NAME"
+echo "📝 Logging:"
+echo "   All logs:    sudo journalctl -u $SERVICE_NAME -f"
+echo "   Recent logs: sudo journalctl -u $SERVICE_NAME --no-pager -l"
 echo
 echo "🔄 The bot will automatically:"
 echo "   ✅ Start on system boot"
 echo "   ✅ Restart if it crashes"
-echo "   ✅ Rotate logs daily"
+echo "   ✅ Log to systemd journal (auto-managed)"
 echo "   ✅ Run with resource limits (1GB RAM, 50% CPU)"
 echo "   ✅ Work from: $BOT_DIR"
 echo "   ✅ Run as: $BOT_USER:$BOT_GROUP"
@@ -163,6 +152,6 @@ echo "   3. Monitor logs for the first few hours"
 echo
 
 # Cleanup
-rm -f /tmp/insider-bot.service /tmp/insider-bot-logrotate
+rm -f /tmp/insider-bot.service
 
 echo "🧹 Cleanup completed - ready to trade! 🚀"

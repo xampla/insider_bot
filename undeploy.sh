@@ -66,14 +66,7 @@ else
     echo "   Service file not found"
 fi
 
-# Remove logrotate config
-if [[ -f "/etc/logrotate.d/$SERVICE_NAME" ]]; then
-    echo "   Removing log rotation config..."
-    sudo rm "/etc/logrotate.d/$SERVICE_NAME"
-    echo "   ✅ Log rotation config removed"
-else
-    echo "   Log rotation config not found"
-fi
+# Logrotate config no longer used (journal logging only)
 
 # Reload systemd
 echo "   Reloading systemd daemon..."
@@ -92,15 +85,14 @@ echo
 echo "📋 What was removed:"
 echo "   ✅ Systemd service ($SERVICE_NAME)"
 echo "   ✅ Auto-start on boot"
-echo "   ✅ Log rotation config"
 echo "   ✅ Temporary deployment files"
 echo
 echo "📁 What was kept:"
 echo "   ✅ Bot source code and configuration"
 echo "   ✅ Virtual environment (insider_bot_env/)"
 echo "   ✅ Database (insider_trading_bot.db)"
-echo "   ✅ Log files (insider_bot.log, logs/)"
 echo "   ✅ Environment file (.env)"
+echo "   ℹ️  Logs are in systemd journal: sudo journalctl -u $SERVICE_NAME"
 echo
 echo "🔄 To redeploy:"
 echo "   ./deploy.sh"

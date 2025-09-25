@@ -74,8 +74,7 @@ class InsiderTradingBot:
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('insider_bot.log'),
-                logging.StreamHandler(sys.stdout)
+                logging.StreamHandler(sys.stdout)  # stdout → terminal (manual) or journal (service)
             ]
         )
 
