@@ -891,7 +891,6 @@ def main():
 {'='*60}
 INSIDER TRADING BOT STARTED
 {'='*60}
-Mode: PAPER TRADING (Alpaca Paper Account)
 Database: {bot.config['database_path']}
 Max Daily Trades: {bot.config['max_daily_trades']}
 Check Interval: {bot.config['sec_check_interval']} seconds

@@ -22,7 +22,7 @@ from database_manager import MarketData, TradeRecord
 class AlpacaTrader:
     """Handles trading operations through Alpaca API"""
 
-    def __init__(self, api_key: str = None, secret_key: str = None, paper: bool = True):
+    def __init__(self, api_key: str = None, secret_key: str = None, paper: bool = None):
         """
         Initialize Alpaca trader
 
