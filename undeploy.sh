@@ -85,8 +85,6 @@ echo "🧹 Cleaning up temporary files..."
 # Remove temporary files that might have been created
 rm -f /tmp/insider-bot.service
 rm -f /tmp/insider-bot-logrotate
-rm -f service_debug.py
-rm -f service_debug.log
 
 echo "✅ UNDEPLOYMENT COMPLETE!"
 echo "======================="
