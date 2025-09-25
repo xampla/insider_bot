@@ -10,7 +10,8 @@ Type=simple
 User={{BOT_USER}}
 Group={{BOT_GROUP}}
 WorkingDirectory={{BOT_DIR}}
-Environment=PATH={{BOT_DIR}}/insider_bot_env/bin
+Environment=PATH={{BOT_DIR}}/insider_bot_env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=VIRTUAL_ENV={{BOT_DIR}}/insider_bot_env
 ExecStart={{BOT_DIR}}/insider_bot_env/bin/python main.py
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
