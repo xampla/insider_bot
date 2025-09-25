@@ -24,12 +24,12 @@ Restart=always
 RestartSec=10
 RestartPreventExitStatus=2
 
-# Security settings (relaxed for debugging)
+# Security settings (optimized)
 NoNewPrivileges=yes
-# ProtectSystem=strict  # Commented out - too restrictive
-# ProtectHome=yes       # Commented out - too restrictive
+# ProtectSystem=strict  # Blocks Python system library access - must stay disabled
+# ProtectHome=yes       # Blocks home directory access - must stay disabled
 ReadWritePaths={{BOT_DIR}}
-# PrivateTmp=yes        # Commented out - might block temp access
+PrivateTmp=yes
 
 # Logging (journal for debugging)
 StandardOutput=journal
