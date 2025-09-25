@@ -24,16 +24,16 @@ Restart=always
 RestartSec=10
 RestartPreventExitStatus=2
 
-# Security settings
+# Security settings (relaxed for debugging)
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
+# ProtectSystem=strict  # Commented out - too restrictive
+# ProtectHome=yes       # Commented out - too restrictive
 ReadWritePaths={{BOT_DIR}}
-PrivateTmp=yes
+# PrivateTmp=yes        # Commented out - might block temp access
 
-# Logging
-StandardOutput=append:{{BOT_DIR}}/logs/service.log
-StandardError=append:{{BOT_DIR}}/logs/service.log
+# Logging (journal for debugging)
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=insider-bot
 
 # Resource limits
