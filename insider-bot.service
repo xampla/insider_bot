@@ -7,11 +7,11 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/home/ubuntu/insider_bot
-Environment=PATH=/home/ubuntu/insider_bot/insider_bot_env/bin
-ExecStart=/home/ubuntu/insider_bot/insider_bot_env/bin/python main.py
+User={{BOT_USER}}
+Group={{BOT_GROUP}}
+WorkingDirectory={{BOT_DIR}}
+Environment=PATH={{BOT_DIR}}/insider_bot_env/bin
+ExecStart={{BOT_DIR}}/insider_bot_env/bin/python main.py
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
 KillSignal=SIGTERM
@@ -26,12 +26,12 @@ RestartPreventExitStatus=2
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/home/ubuntu/insider_bot
+ReadWritePaths={{BOT_DIR}}
 PrivateTmp=yes
 
 # Logging
-StandardOutput=append:/home/ubuntu/insider_bot/logs/service.log
-StandardError=append:/home/ubuntu/insider_bot/logs/service.log
+StandardOutput=append:{{BOT_DIR}}/logs/service.log
+StandardError=append:{{BOT_DIR}}/logs/service.log
 SyslogIdentifier=insider-bot
 
 # Resource limits

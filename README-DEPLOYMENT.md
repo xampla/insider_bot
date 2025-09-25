@@ -1,14 +1,28 @@
 # Ubuntu Production Deployment Guide
 
+## 🚀 **Directory Agnostic** - Works Anywhere!
+
+The deployment automatically detects your setup:
+- ✅ **Any directory** (`/home/user/bot`, `/opt/trading`, `/var/apps/insider_bot`)
+- ✅ **Any user** (ubuntu, ec2-user, john, trading-user)
+- ✅ **Auto-configuration** (no manual path editing)
+
 ## Quick Setup (3 Steps)
 
 ### 1. Deploy as Service
 ```bash
-# Make deployment script executable
+# From your bot directory (wherever you cloned it):
 chmod +x deploy.sh
-
-# Run deployment (will ask for sudo password)
 ./deploy.sh
+```
+
+**The script will auto-detect:**
+```
+🔍 Auto-detected Configuration:
+   User: your-username
+   Group: your-group
+   Directory: /your/actual/path/insider_bot
+   Service: insider-bot
 ```
 
 ### 2. Configure Credentials
@@ -49,6 +63,7 @@ tail -f insider_bot.log
 ✅ **Logs to files** with automatic rotation
 ✅ **Resource limits** (1GB RAM, 50% CPU)
 ✅ **Security** hardening (restricted permissions)
+✅ **Fully portable** (works from any directory/user)
 
 ## Log Files
 
@@ -56,14 +71,33 @@ tail -f insider_bot.log
 - **Service**: `logs/service.log` (systemd output)
 - **System**: `sudo journalctl -u insider-bot` (system logs)
 
-## File Locations
+## Example Deployments
 
-```
-/home/ubuntu/insider_bot/
+**Ubuntu Server:**
+```bash
+/opt/trading/insider_bot/
 ├── insider_bot.log          # Main application log
 ├── logs/service.log         # Service output
 ├── insider_trading_bot.db   # Database
 └── .env                     # API credentials
 ```
 
-That's it! The bot will run indefinitely and survive reboots. 🚀
+**Home Directory:**
+```bash
+/home/trader/projects/insider_bot/
+├── insider_bot.log          # Main application log
+├── logs/service.log         # Service output
+├── insider_trading_bot.db   # Database
+└── .env                     # API credentials
+```
+
+**EC2 Instance:**
+```bash
+/home/ec2-user/insider_bot/
+├── insider_bot.log          # Main application log
+├── logs/service.log         # Service output
+├── insider_trading_bot.db   # Database
+└── .env                     # API credentials
+```
+
+That's it! Clone anywhere, run `./deploy.sh`, and the bot will run indefinitely! 🚀
