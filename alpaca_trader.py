@@ -4,7 +4,7 @@ Handles portfolio management, market data, and trade execution via Alpaca API.
 """
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, GetPortfolioHistoryRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -95,7 +95,7 @@ class AlpacaTrader:
                 'equity': float(account.equity),
                 'long_market_value': float(account.long_market_value),
                 'short_market_value': float(account.short_market_value),
-                'day_trade_count': int(account.day_trade_count),
+                'day_trade_count': getattr(account, 'day_trade_count', 0),  # Default to 0 if not available
                 'pattern_day_trader': account.pattern_day_trader,
                 'trading_blocked': account.trading_blocked,
                 'status': account.status
@@ -111,7 +111,7 @@ class AlpacaTrader:
             return [
                 {
                     'symbol': pos.symbol,
-                    'qty': int(pos.qty),
+                    'qty': float(pos.qty),  # Handle fractional shares
                     'market_value': float(pos.market_value),
                     'cost_basis': float(pos.cost_basis),
                     'unrealized_pl': float(pos.unrealized_pl),
@@ -236,6 +236,152 @@ class AlpacaTrader:
             self.logger.error(f"Error calculating ATR: {e}")
             return 0.0
 
+    def _get_spy_gap_data(self) -> Dict[str, Any]:
+        """
+        Get SPY data for gap calculation using hybrid approach:
+        - AlphaVantage for reliable historical close data
+        - Alpaca for today's open (when available)
+
+        Returns:
+            Dict with success status, current_open, previous_close, and reason
+        """
+        import requests
+        import json
+        from datetime import datetime
+
+        try:
+            # Get AlphaVantage API key from environment
+            alpha_key = os.getenv('ALPHAVANTAGE_API_KEY', 'WDABSJY7AQU6IJF1')
+
+            # 1. Get historical data from AlphaVantage (reliable for yesterday's close)
+            av_url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&apikey={alpha_key}"
+
+            response = requests.get(av_url, timeout=10)
+            response.raise_for_status()
+
+            av_data = response.json()
+
+            if "Error Message" in av_data:
+                raise Exception(f"AlphaVantage error: {av_data['Error Message']}")
+
+            if "Note" in av_data:
+                # API call frequency limit
+                self.logger.warning(f"AlphaVantage rate limit: {av_data['Note']}")
+                return self._fallback_to_alpaca_only()
+
+            time_series = av_data.get("Time Series (Daily)", {})
+            if not time_series:
+                raise Exception("No time series data from AlphaVantage")
+
+            # Get sorted dates (most recent first)
+            dates = sorted(time_series.keys(), reverse=True)
+
+            if len(dates) < 1:
+                raise Exception("Insufficient AlphaVantage data")
+
+            # Get yesterday's close from AlphaVantage
+            latest_date = dates[0]
+            previous_close = float(time_series[latest_date]['4. close'])
+
+            self.logger.info(f"📊 AlphaVantage: Previous close ({latest_date}): ${previous_close:.2f}")
+
+            # 2. Try to get today's open from Alpaca (real-time when market is open)
+            try:
+                request = StockBarsRequest(
+                    symbol_or_symbols='SPY',
+                    timeframe=TimeFrame.Day,
+                    limit=1
+                )
+                spy_bars = self.data_client.get_stock_bars(request).df
+
+                if spy_bars is not None and len(spy_bars) > 0:
+                    current_open = spy_bars.iloc[-1]['open']
+                    today_date = spy_bars.index.get_level_values('timestamp')[-1].date()
+                    self.logger.info(f"📊 Alpaca: Current open ({today_date}): ${current_open:.2f}")
+
+                    return {
+                        'success': True,
+                        'current_open': float(current_open),
+                        'previous_close': previous_close,
+                        'data_source': 'AlphaVantage(historical) + Alpaca(today)',
+                        'reason': 'Hybrid data source successful'
+                    }
+
+            except Exception as alpaca_error:
+                self.logger.info(f"Alpaca current data unavailable: {alpaca_error}")
+
+            # 3. Fallback: Use AlphaVantage for both yesterday and today
+            if len(dates) >= 2:
+                today_data = time_series[dates[0]]
+                current_open = float(today_data['1. open'])
+
+                # Use second-most recent date for yesterday's close
+                yesterday_date = dates[1]
+                previous_close = float(time_series[yesterday_date]['4. close'])
+
+                self.logger.info(f"📊 AlphaVantage fallback: Using {dates[0]} open vs {yesterday_date} close")
+
+                return {
+                    'success': True,
+                    'current_open': current_open,
+                    'previous_close': previous_close,
+                    'data_source': 'AlphaVantage(both)',
+                    'reason': 'AlphaVantage fallback successful'
+                }
+            else:
+                return {
+                    'success': False,
+                    'current_open': 0.0,
+                    'previous_close': 0.0,
+                    'data_source': 'None',
+                    'reason': 'Insufficient AlphaVantage historical data'
+                }
+
+        except requests.RequestException as e:
+            self.logger.warning(f"AlphaVantage network error: {e}")
+            return self._fallback_to_alpaca_only()
+        except Exception as e:
+            self.logger.warning(f"AlphaVantage data error: {e}")
+            return self._fallback_to_alpaca_only()
+
+    def _fallback_to_alpaca_only(self) -> Dict[str, Any]:
+        """Fallback to original Alpaca-only approach when AlphaVantage fails"""
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols='SPY',
+                timeframe=TimeFrame.Day,
+                limit=2
+            )
+            spy_bars = self.data_client.get_stock_bars(request).df
+
+            if spy_bars is not None and len(spy_bars) >= 2:
+                current_open = spy_bars.iloc[-1]['open']
+                previous_close = spy_bars.iloc[-2]['close']
+
+                return {
+                    'success': True,
+                    'current_open': float(current_open),
+                    'previous_close': float(previous_close),
+                    'data_source': 'Alpaca(fallback)',
+                    'reason': 'Alpaca fallback successful'
+                }
+            else:
+                return {
+                    'success': False,
+                    'current_open': 0.0,
+                    'previous_close': 0.0,
+                    'data_source': 'None',
+                    'reason': 'Both AlphaVantage and Alpaca failed'
+                }
+        except Exception as e:
+            return {
+                'success': False,
+                'current_open': 0.0,
+                'previous_close': 0.0,
+                'data_source': 'None',
+                'reason': f'All data sources failed: {e}'
+            }
+
     def get_enhanced_spy_condition(self, symbol: str = None,
                                   has_insider_cluster: bool = False) -> Dict[str, Any]:
         """
@@ -254,36 +400,48 @@ class AlpacaTrader:
             Dict with trading decision and reasoning
         """
         try:
-            # Get SPY gap data
-            request = StockBarsRequest(
-                symbol_or_symbols='SPY',
-                timeframe=TimeFrame.Day,
-                limit=2
-            )
-            spy_bars = self.data_client.get_stock_bars(request).df
+            # Get SPY gap data using hybrid approach (AlphaVantage + Alpaca)
+            spy_data = self._get_spy_gap_data()
 
-            if len(spy_bars) < 2:
-                self.logger.warning("Insufficient SPY data for gap calculation")
+            if not spy_data['success']:
+                self.logger.warning(f"SPY data unavailable: {spy_data['reason']}")
                 return {
                     'trading_allowed': True,
                     'gap_percent': 0.0,
-                    'reason': 'Insufficient SPY data',
-                    'filter_applied': False
+                    'reason': f"SPY data unavailable - allowing trades with caution ({spy_data['reason']})",
+                    'filter_applied': False,
+                    'risk_multiplier': 1.0
                 }
 
-            current_open = spy_bars.iloc[-1]['open']
-            previous_close = spy_bars.iloc[-2]['close']
+            current_open = spy_data['current_open']
+            previous_close = spy_data['previous_close']
+            self.logger.info(f"📊 SPY Gap Data: {spy_data['data_source']} - Open: ${current_open:.2f}, Close: ${previous_close:.2f}")
 
-            if previous_close == 0:
-                self.logger.warning("Previous close is zero, skipping gap calculation")
+            # Robust validation for SPY data
+            import numpy as np
+            if (previous_close == 0 or current_open == 0 or
+                pd.isna(previous_close) or pd.isna(current_open) or
+                not np.isfinite(previous_close) or not np.isfinite(current_open)):
+                self.logger.warning(f"Invalid SPY data: current_open={current_open}, previous_close={previous_close}")
                 return {
                     'trading_allowed': True,
                     'gap_percent': 0.0,
-                    'reason': 'Invalid SPY data',
-                    'filter_applied': False
+                    'reason': 'Invalid SPY data - allowing trades with caution',
+                    'filter_applied': False,
+                    'risk_multiplier': 1.0
                 }
 
-            gap_percent = ((current_open - previous_close) / previous_close) * 100
+            try:
+                gap_percent = ((current_open - previous_close) / previous_close) * 100
+            except (ZeroDivisionError, ValueError, ArithmeticError) as e:
+                self.logger.warning(f"SPY gap calculation failed: {e} (current: {current_open}, previous: {previous_close})")
+                return {
+                    'trading_allowed': True,
+                    'gap_percent': 0.0,
+                    'reason': 'SPY calculation error - allowing trades with caution',
+                    'filter_applied': False,
+                    'risk_multiplier': 1.0
+                }
 
             # GRANULAR SPY MARKET FILTER with graduated risk adjustments
             abs_gap = abs(gap_percent)
@@ -423,8 +581,9 @@ class AlpacaTrader:
             return {
                 'trading_allowed': True,
                 'gap_percent': 0.0,
-                'reason': f'Error in SPY filter: {e}',
-                'filter_applied': False
+                'reason': f'SPY filter error - allowing trades with caution: {e}',
+                'filter_applied': False,
+                'risk_multiplier': 1.0
             }
 
     def calculate_insider_role_adjustment(self, filing_data: Dict) -> int:
@@ -1521,11 +1680,12 @@ class AlpacaTrader:
     def get_portfolio_performance(self) -> Dict[str, Any]:
         """Get portfolio performance metrics"""
         try:
-            # Get portfolio history
-            portfolio_history = self.trading_client.get_portfolio_history(
+            # Get portfolio history using proper request pattern
+            history_request = GetPortfolioHistoryRequest(
                 period='1M',  # 1 month
                 timeframe='1D'  # Daily
             )
+            portfolio_history = self.trading_client.get_portfolio_history(history_request)
 
             if not portfolio_history.equity:
                 return {}
@@ -1612,9 +1772,13 @@ class AlpacaTrader:
             # Get current market status
             clock = self.trading_client.get_clock()
 
-            # Convert to Eastern Time (market timezone)
+            # Convert to Eastern Time (market timezone) and local timezone
             et_tz = pytz.timezone('US/Eastern')
             current_time = datetime.now(et_tz)
+
+            # Also get current time in Spain (CET/CEST) for user reference
+            spain_tz = pytz.timezone('Europe/Madrid')
+            spain_time = datetime.now(spain_tz)
 
             # Parse market open/close times
             next_open = clock.next_open.astimezone(et_tz)
@@ -1677,11 +1841,15 @@ class AlpacaTrader:
                 'reason': reason,
                 'is_market_open': is_market_open,
                 'current_time_et': current_time.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'current_time_spain': spain_time.strftime('%Y-%m-%d %H:%M:%S %Z'),
                 'next_open': next_open.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'next_open_spain': next_open.astimezone(spain_tz).strftime('%Y-%m-%d %H:%M:%S %Z'),
                 'next_close': next_close.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'next_close_spain': next_close.astimezone(spain_tz).strftime('%Y-%m-%d %H:%M:%S %Z'),
                 'minutes_until_action': minutes_until_action,
                 'minutes_until_close': minutes_until_close,
                 'next_action_time': next_action_time.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'next_action_time_spain': next_action_time.astimezone(spain_tz).strftime('%Y-%m-%d %H:%M:%S %Z'),
                 'wsv_compliant': True  # Always true when using this method
             }
 
@@ -1689,7 +1857,11 @@ class AlpacaTrader:
             self.logger.info(f"   Current window: {window}")
             self.logger.info(f"   Recommended action: {action}")
             self.logger.info(f"   Reason: {reason}")
+            self.logger.info(f"   Current time: {current_time.strftime('%H:%M %Z')} / {spain_time.strftime('%H:%M %Z')} (Spain)")
             self.logger.info(f"   Next action in: {minutes_until_action} minutes")
+            if action == "QUEUE_FOR_NEXT_OPEN":
+                next_open_spain = next_open.astimezone(spain_tz)
+                self.logger.info(f"   Next market open: {next_open.strftime('%H:%M %Z')} / {next_open_spain.strftime('%H:%M %Z')} (Spain)")
 
             return result
 

@@ -29,6 +29,7 @@ class InsiderFiling:
     filing_date: str
     is_first_time_purchase: bool
     raw_filing_data: str  # JSON string of raw data
+    created_at: str = ""  # Database timestamp (auto-generated)
 
 @dataclass
 class MarketData:
@@ -217,6 +218,17 @@ class DatabaseManager:
                         gap_percent REAL NOT NULL,
                         trading_allowed BOOLEAN NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                # Processed document URLs cache table (prevents re-parsing same URLs)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS processed_document_urls (
+                        url TEXT PRIMARY KEY,
+                        company_symbol TEXT NOT NULL,
+                        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        result_type TEXT NOT NULL,  -- 'transactions_found', 'no_transactions', 'parse_error'
+                        transaction_count INTEGER DEFAULT 0
                     )
                 """)
 
@@ -639,6 +651,32 @@ class DatabaseManager:
         except sqlite3.Error as e:
             self.logger.error(f"Error cleaning database: {e}")
             raise
+
+    def is_document_url_processed(self, url: str) -> bool:
+        """Check if a document URL has already been processed"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM processed_document_urls WHERE url = ?", (url,))
+                return cursor.fetchone() is not None
+        except sqlite3.Error as e:
+            self.logger.error(f"Error checking processed URL: {e}")
+            return False
+
+    def cache_processed_document_url(self, url: str, company_symbol: str,
+                                   result_type: str, transaction_count: int = 0):
+        """Cache a processed document URL to avoid re-processing"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO processed_document_urls
+                    (url, company_symbol, result_type, transaction_count)
+                    VALUES (?, ?, ?, ?)
+                """, (url, company_symbol, result_type, transaction_count))
+                conn.commit()
+        except sqlite3.Error as e:
+            self.logger.error(f"Error caching processed URL: {e}")
 
     def close(self):
         """Close database connections (if any persistent connections)"""

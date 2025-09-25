@@ -19,7 +19,7 @@ import time
 import signal
 import schedule
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 import argparse
 import json
 
@@ -59,6 +59,7 @@ class InsiderTradingBot:
 
         # State tracking
         self.is_running = False
+        self.shutdown_requested = False  # Track shutdown requests during initialization
         self.last_filing_check = None
         self.daily_trade_count = 0
         self.start_time = datetime.now()
@@ -85,7 +86,6 @@ class InsiderTradingBot:
             'sec_check_interval': int(os.getenv('SEC_CHECK_INTERVAL', '300')),  # 5 minutes
             'max_daily_trades': int(os.getenv('MAX_DAILY_TRADES', '10')),
             'max_position_per_trade': float(os.getenv('MAX_POSITION_PCT', '0.05')),  # 5%
-            'dry_run': os.getenv('DRY_RUN', 'false').lower() == 'true',
             'user_agent': os.getenv('SEC_USER_AGENT', 'InsiderBot research@example.com'),
             'market_open_delay': int(os.getenv('MARKET_OPEN_DELAY', '15')),  # Wait 15 min after open
             'end_of_day_exit': os.getenv('END_OF_DAY_EXIT', 'true').lower() == 'true'
@@ -107,15 +107,20 @@ class InsiderTradingBot:
         try:
             self.logger.info("Initializing system components...")
 
+            # Check for shutdown request early
+            if self.shutdown_requested:
+                self.logger.info("🛑 Shutdown requested before database initialization")
+                return
+
             # Initialize database
             self.db_manager = DatabaseManager(self.config['database_path'])
             self.logger.info("Database manager initialized")
 
             # Production mode - using real SEC data only
 
-            # Initialize real SEC data reader (with real XML parsing)
+            # Initialize real SEC data reader (with real XML parsing and URL caching)
             user_agent = self.config['user_agent']
-            self.sec_reader = SECHistoricalLoader(user_agent)
+            self.sec_reader = SECHistoricalLoader(user_agent, self.db_manager)
 
             # SEC Historical Loader with real XML parsing is ready
             self.logger.info("✅ Real SEC API access confirmed")
@@ -140,12 +145,29 @@ class InsiderTradingBot:
             self.logger.info("Strategy engine initialized")
 
             # Initialize auto-backfill system
-            self.sec_historical_loader = SECHistoricalLoader(user_agent)
+            self.sec_historical_loader = SECHistoricalLoader(user_agent, self.db_manager)
             self.backfill_manager = AutoBackfillManager(self.db_manager, self.sec_historical_loader)
 
             # Check and execute auto-backfill if needed
-            self.logger.info("🔍 Checking database backfill requirements...")
-            backfill_result = self.backfill_manager.check_and_backfill()
+            self.logger.info("📚 Auto-Backfill Check - Filling any HISTORICAL gaps in database...")
+            self.logger.info("   (Scans last 60 days to ensure no missing data)")
+
+            # Check for shutdown during initialization
+            if self.shutdown_requested:
+                self.logger.info("🛑 Shutdown requested during initialization, skipping auto-backfill")
+                return
+
+            # Handle interrupts during backfill
+            try:
+                backfill_result = self.backfill_manager.check_and_backfill()
+            except KeyboardInterrupt:
+                self.logger.info("🛑 Auto-backfill interrupted by user")
+                return
+
+            # Check for shutdown after backfill
+            if self.shutdown_requested:
+                self.logger.info("🛑 Shutdown requested after auto-backfill")
+                return
 
             if backfill_result['backfill_executed']:
                 self.logger.info(f"✅ Auto-backfill completed: {backfill_result['stored_count']} new filings")
@@ -172,20 +194,31 @@ class InsiderTradingBot:
 
     def signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        self.logger.info(f"Received signal {signum}, shutting down gracefully...")
-        self.shutdown()
+        self.logger.info(f"🛑 Received signal {signum} (Ctrl+C), shutting down gracefully...")
+        self.shutdown_requested = True
+        if self.is_running:
+            self.shutdown()
+        else:
+            # During initialization, just set flag and exit
+            self.logger.info("💥 Forcing immediate shutdown during initialization...")
+            import sys
+            sys.exit(0)
 
     def run_filing_check(self):
         """Check for new SEC Form 4 filings and process them"""
         try:
-            self.logger.info("Checking for new Form 4 filings...")
+            self.logger.info("🔍 Scheduled Filing Check - Looking for NEW filings since last check...")
+            self.logger.info("   (This is different from auto-backfill which fills historical gaps)")
 
             # Get recent filings (last 1 day) using real XML parsing
             today = datetime.now().strftime('%Y-%m-%d')
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
-            # Use the same companies as auto-backfill system
-            target_companies = ['AAPL', 'NVDA', 'MSFT', 'TSLA', 'GOOGL', 'AMZN', 'META']
+            # Use the same companies as auto-backfill system (all 36 companies)
+            target_companies = self.backfill_manager._get_target_companies()
+
+            self.logger.info(f"   📊 Checking {len(target_companies)} companies for new filings (Date range: {yesterday} to {today})")
+            self.logger.info(f"   🏢 Companies: {', '.join(target_companies[:10])}{'...' if len(target_companies) > 10 else ''}")
 
             recent_filings = self.sec_reader.load_historical_data(
                 start_date=yesterday,
@@ -194,13 +227,26 @@ class InsiderTradingBot:
             )
 
             new_filings_processed = 0
+            duplicate_filings_skipped = 0
+
             for filing in recent_filings:
-                # Store in database (real data, no validation needed)
+                # Store in database with duplicate detection
                 if self.db_manager.store_insider_filing(filing):
                     new_filings_processed += 1
-                    self.logger.info(f"Stored new filing: {filing.filing_id}")
+                    self.logger.info(f"📄 NEW filing: {filing.filing_id} ({filing.company_symbol} - {filing.insider_name})")
+                else:
+                    duplicate_filings_skipped += 1
 
-            self.logger.info(f"Processed {new_filings_processed} new filings")
+            if new_filings_processed > 0:
+                self.logger.info(f"✅ Processed {new_filings_processed} NEW filings (added to database for analysis)")
+                if duplicate_filings_skipped > 0:
+                    self.logger.info(f"   📋 Skipped {duplicate_filings_skipped} duplicate filings (already in database)")
+            else:
+                if duplicate_filings_skipped > 0:
+                    self.logger.info(f"ℹ️  No new filings found, but {duplicate_filings_skipped} duplicates were detected (already processed)")
+                else:
+                    self.logger.info("ℹ️  No filings found in the last 24 hours")
+
             self.last_filing_check = datetime.now()
 
         except Exception as e:
@@ -228,9 +274,6 @@ class InsiderTradingBot:
     def execute_trades(self):
         """Execute trades based on buy signals with WSV timing strategy"""
         try:
-            # Check if we're in dry run mode
-            if self.config['dry_run']:
-                self.logger.info("DRY RUN MODE - No actual trades will be executed")
 
             # 🕘 WSV TIMING STRATEGY: Execute queued trades first (if market is open)
             # This handles trades detected after hours that were queued for market open
@@ -281,6 +324,18 @@ class InsiderTradingBot:
                     symbol = signal['symbol']
                     filing_id = signal['filing_id']
                     base_strategy_score = signal['total_score']
+
+                    # 📅 DATE FILTER: Skip old backfilled signals (only trade recent filings)
+                    # WSV strategy requires fresh momentum - old signals are stale
+                    analysis_date = signal.get('analysis_date')
+                    if analysis_date:
+                        from datetime import datetime
+                        signal_date = datetime.strptime(analysis_date, '%Y-%m-%d')
+                        days_old = (datetime.now() - signal_date).days
+
+                        if days_old > 2:  # Only trade signals from last 2 days
+                            self.logger.info(f"⏭️ Skipping {symbol}: Signal too old ({days_old} days) - WSV requires fresh momentum")
+                            continue
 
                     # Check if this specific signal qualifies for cluster exception
                     cluster_details = self._get_insider_cluster_details(symbol, signal.get('analysis_date'))
@@ -418,20 +473,30 @@ class InsiderTradingBot:
 
                     # Execute trade with enhanced PDF-compliant strategy
                     # Note: take_profit_variant is now determined automatically by strategy_score
-                    if not self.config['dry_run']:
-                        trade_record = self.trader.place_buy_order(
-                            symbol, shares, strategy_score, filing_id, stop_variant
-                        )
+                    trade_record = self.trader.place_buy_order(
+                        symbol, shares, strategy_score, filing_id, stop_variant
+                    )
 
-                        if trade_record:
-                            # Store trade record
-                            self.db_manager.store_trade_record(trade_record)
-                            self.daily_trade_count += 1
-                            self.logger.info(f"Executed trade: {symbol} - {shares} shares")
-                        else:
-                            self.logger.error(f"Failed to execute trade for {symbol}")
+                    if trade_record:
+                        # Store trade record
+                        self.db_manager.store_trade_record(trade_record)
+                        self.daily_trade_count += 1
+
+                        # Enhanced trade logging with portfolio context
+                        trade_value = shares * trade_record.entry_price
+                        account_info = self.trader.get_account_info()
+                        portfolio_value = account_info.get('portfolio_value', 0)
+                        trade_percentage = (trade_value / portfolio_value * 100) if portfolio_value > 0 else 0
+
+                        self.logger.info(f"🎯 TRADE EXECUTED: {symbol}")
+                        self.logger.info(f"   📊 Position: {shares} shares @ ${trade_record.entry_price:.2f}")
+                        self.logger.info(f"   💰 Trade value: ${trade_value:,.2f}")
+                        self.logger.info(f"   🏦 Portfolio: ${portfolio_value:,.2f}")
+                        self.logger.info(f"   📈 Position size: {trade_percentage:.2f}% of portfolio")
+                        self.logger.info(f"   🎯 Strategy score: {strategy_score}")
+                        self.logger.info(f"   📋 Filing ID: {filing_id}")
                     else:
-                        self.logger.info(f"DRY RUN: Would buy {shares} shares of {symbol}")
+                        self.logger.error(f"❌ Failed to execute trade for {symbol}")
 
                 except Exception as e:
                     self.logger.error(f"Error executing trade for {signal.get('symbol', 'unknown')}: {e}")
@@ -628,22 +693,20 @@ class InsiderTradingBot:
                     current_price = trade['current_price']
 
                     # Close position
-                    if not self.config['dry_run']:
-                        if self.trader.place_sell_order(symbol, shares, exit_reason):
-                            # Update trade record
-                            trade['exit_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            trade['exit_price'] = current_price
-                            trade['pnl'] = (current_price - trade['entry_price']) * shares
-                            trade['pnl_percent'] = (trade['pnl'] / trade['position_value']) * 100
+                    if self.trader.place_sell_order(symbol, shares, exit_reason):
+                        # Update trade record
+                        trade['exit_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        trade['exit_price'] = current_price
+                        trade['pnl'] = (current_price - trade['entry_price']) * shares
+                        trade['pnl_percent'] = (trade['pnl'] / trade['position_value']) * 100
 
-                            # Convert to TradeRecord and update database
-                            from database_manager import TradeRecord
-                            updated_trade = TradeRecord(**trade)
-                            self.db_manager.store_trade_record(updated_trade)
+                        # Convert to TradeRecord and update database
+                        from database_manager import TradeRecord
+                        updated_trade = TradeRecord(**trade)
+                        self.db_manager.store_trade_record(updated_trade)
 
-                            self.logger.info(f"Closed position: {symbol} - {exit_reason}")
-                    else:
-                        self.logger.info(f"DRY RUN: Would close {symbol} - {exit_reason}")
+                        self.logger.info(f"✅ Closed position: {symbol} - {exit_reason}")
+                        self.logger.info(f"💰 P&L: ${trade['pnl']:,.2f} ({trade['pnl_percent']:+.2f}%)")
 
                 except Exception as e:
                     self.logger.error(f"Error managing position {trade.get('symbol', 'unknown')}: {e}")
@@ -655,12 +718,8 @@ class InsiderTradingBot:
         """Close all positions at end of trading day"""
         try:
             if self.config['end_of_day_exit']:
-                self.logger.info("Performing end-of-day cleanup...")
-
-                if not self.config['dry_run']:
-                    self.trader.close_all_positions("END_OF_DAY")
-                else:
-                    self.logger.info("DRY RUN: Would close all positions")
+                self.logger.info("🌅 Performing end-of-day cleanup...")
+                self.trader.close_all_positions("END_OF_DAY")
 
                 # Reset daily counters
                 self.daily_trade_count = 0
@@ -724,7 +783,20 @@ class InsiderTradingBot:
         schedule.every(30).minutes.do(self.print_status)
 
         self.is_running = True
-        self.logger.info("Scheduled operations started")
+
+        # Show timezone info for Spain-based user
+        import pytz
+        et_tz = pytz.timezone('US/Eastern')
+        spain_tz = pytz.timezone('Europe/Madrid')
+        current_et = datetime.now(et_tz)
+        current_spain = datetime.now(spain_tz)
+
+        self.logger.info("🚀 Scheduled operations started")
+        self.logger.info(f"   📍 Your local time (Spain): {current_spain.strftime('%H:%M %Z')}")
+        self.logger.info(f"   📍 Market time (US Eastern): {current_et.strftime('%H:%M %Z')}")
+        self.logger.info(f"   🔄 Bot will check for SEC filings every {self.config['sec_check_interval']} seconds")
+        self.logger.info(f"   📊 Status reports every 30 minutes")
+        self.logger.info(f"   🌅 End-of-day cleanup at 16:05 ET (22:05/23:05 Spain depending on DST)")
 
         try:
             while self.is_running:
@@ -782,7 +854,6 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Insider Trading Bot')
     parser.add_argument('--config', help='Configuration file path')
-    parser.add_argument('--dry-run', action='store_true', help='Run in dry-run mode')
     parser.add_argument('--status', action='store_true', help='Print status and exit')
     parser.add_argument('--backtest', nargs=2, metavar=('start_date', 'end_date'),
                        help='Run backtest for date range (YYYY-MM-DD)')
@@ -790,13 +861,19 @@ def main():
 
     args = parser.parse_args()
 
-    # Override dry-run from command line
-    if args.dry_run:
-        os.environ['DRY_RUN'] = 'true'
 
     try:
-        # Create and initialize bot
+        # Create bot instance
         bot = InsiderTradingBot(args.config)
+
+        # Handle --clean early to avoid wasteful initialization
+        if args.clean:
+            # Only initialize minimal components needed for cleaning
+            bot.db_manager = DatabaseManager(bot.config['database_path'])
+            bot.clean_database()
+            return
+
+        # Full initialization for all other operations
         bot.initialize_components()
 
         if args.status:
@@ -809,17 +886,12 @@ def main():
             bot.run_backtest(args.backtest[0], args.backtest[1])
             return
 
-        if args.clean:
-            # Clean database and exit
-            bot.clean_database()
-            return
-
         # Normal operation - start scheduling
         print(f"""
 {'='*60}
 INSIDER TRADING BOT STARTED
 {'='*60}
-Mode: {'DRY RUN' if bot.config['dry_run'] else 'LIVE TRADING'}
+Mode: PAPER TRADING (Alpaca Paper Account)
 Database: {bot.config['database_path']}
 Max Daily Trades: {bot.config['max_daily_trades']}
 Check Interval: {bot.config['sec_check_interval']} seconds

@@ -19,23 +19,60 @@ from database_manager import InsiderFiling
 class SECHistoricalLoader:
     """Loads real historical insider trading data from SEC for backtesting"""
 
-    def __init__(self, user_agent: str = None):
+    def __init__(self, user_agent: str = None, db_manager=None):
         """Initialize historical data loader"""
         self.logger = logging.getLogger(__name__)
+        self.db_manager = db_manager  # Optional database manager for URL caching
 
         # SEC API configuration
         self.user_agent = user_agent or "InsideTracker admin@gmail.com"
         self.request_delay = 0.1  # 100ms delay between requests
 
-        # Target companies for PoC (expandable)
+        # Complete target companies mapping (all 36 companies across all tiers)
         self.target_companies = {
-            'AAPL': '0000320193',
-            'NVDA': '0001045810',
-            'MSFT': '0000789019',
-            'TSLA': '0001318605',
-            'GOOGL': '0001652044',
-            'AMZN': '0001018724',
-            'META': '0001326801'
+            # Tier 1: Mega-caps
+            'AAPL': '0000320193',    # Apple Inc
+            'NVDA': '0001045810',    # NVIDIA Corp
+            'MSFT': '0000789019',    # Microsoft Corp
+            'GOOGL': '0001652044',   # Alphabet Inc Class A
+            'AMZN': '0001018724',    # Amazon.com Inc
+            'META': '0001326801',    # Meta Platforms Inc
+            'TSLA': '0001318605',    # Tesla Inc
+
+            # Tier 2: Large-caps
+            'JPM': '0000019617',     # JPMorgan Chase & Co
+            'JNJ': '0000200406',     # Johnson & Johnson
+            'V': '0001403161',       # Visa Inc
+            'PG': '0000080424',      # Procter & Gamble Co
+            'UNH': '0000731766',     # UnitedHealth Group Inc
+            'HD': '0000354950',      # Home Depot Inc
+            'MA': '0001141391',      # Mastercard Inc
+            'DIS': '0001001039',     # Walt Disney Co
+            'NFLX': '0001065280',    # Netflix Inc
+            'CRM': '0001108524',     # Salesforce Inc
+
+            # Tier 3: Mid-caps + Quality
+            'DDOG': '0001561550',    # Datadog Inc
+            'ZS': '0001713683',      # Zscaler Inc
+            'CRWD': '0001535527',    # CrowdStrike Holdings Inc
+            'TEAM': '0001650372',    # Atlassian Corp
+            'ALGN': '0001097149',    # Align Technology Inc
+            'ROKU': '0001428439',    # Roku Inc
+            'ADBE': '0000796343',    # Adobe Inc
+            'PFE': '0000078003',     # Pfizer Inc
+            'KO': '0000021344',      # Coca-Cola Co
+            'TMO': '0000097745',     # Thermo Fisher Scientific Inc
+            'ABT': '0000001800',     # Abbott Laboratories
+
+            # Tier 4: Small-cap Sandbox
+            'PLTR': '0001321655',    # Palantir Technologies Inc
+            'RBLX': '0001315098',    # Roblox Corp
+            'FUBO': '0001507230',    # FuboTV Inc
+            'SOFI': '0001818874',    # SoFi Technologies Inc
+            'OPEN': '0001518715',    # Opendoor Technologies Inc
+            'COIN': '0001679788',    # Coinbase Global Inc
+            'HOOD': '0001783879',    # Robinhood Markets Inc
+            'LCID': '0001811210'     # Lucid Group Inc
         }
 
     def _rate_limited_request(self, url: str) -> Optional[requests.Response]:
@@ -161,8 +198,10 @@ class SECHistoricalLoader:
             if not document_url:
                 return []
 
-            # For PoC Phase 1: Log what we find and return structured placeholders
-            # In Phase 2: Implement full XML parsing
+            # URL caching: Skip if already processed (prevents redundant parsing)
+            if self.db_manager and self.db_manager.is_document_url_processed(document_url):
+                self.logger.info(f"   📋 Skipping already processed URL: {document_url}")
+                return []
 
             self.logger.info(f"   📄 Attempting to parse: {document_url}")
 
@@ -183,97 +222,41 @@ class SECHistoricalLoader:
                     # Try to parse real XML content
                     parsed_filings = self._parse_form4_xml(response.text, filing_metadata, ticker)
                     if parsed_filings:
+                        # Cache successful parsing with transactions
+                        if self.db_manager:
+                            self.db_manager.cache_processed_document_url(
+                                document_url, ticker, 'transactions_found', len(parsed_filings)
+                            )
                         return parsed_filings
+                    else:
+                        self.logger.info(f"      📋 XML parsed successfully, but no qualifying transactions found for {ticker}")
+                        # Cache successful parsing but no qualifying transactions
+                        if self.db_manager:
+                            self.db_manager.cache_processed_document_url(
+                                document_url, ticker, 'no_transactions', 0
+                            )
+                        return []
                 else:
                     self.logger.info(f"      ❌ Not XML content: {content_preview[:50]}...")
 
-            # Fallback: Create structured filing from metadata (Phase 1 approach)
-            self.logger.info(f"      📋 Using metadata-based approach")
-            filing = self._create_structured_filing_from_metadata(filing_metadata, ticker, "")
-            return [filing] if filing else []
+            # Only reach here if no XML files found or all failed to parse
+            self.logger.warning(f"      ❌ No valid XML content found for {ticker}")
+            # Cache parse error
+            if self.db_manager:
+                self.db_manager.cache_processed_document_url(
+                    document_url, ticker, 'parse_error', 0
+                )
+            return []
 
         except Exception as e:
             self.logger.error(f"Error parsing Form 4 document: {e}")
+            # Cache parse error
+            if self.db_manager:
+                self.db_manager.cache_processed_document_url(
+                    document_url, ticker, 'parse_error', 0
+                )
             return []
 
-    def _create_structured_filing_from_metadata(self, filing_metadata: Dict, ticker: str, raw_content: str) -> Optional[InsiderFiling]:
-        """
-        Create structured InsiderFiling from real Form 4 XML data
-        Parses actual SEC Form 4 documents for real transaction details
-        """
-        try:
-            cik = filing_metadata.get('cik', '')
-            filing_date = filing_metadata.get('filing_date', '')
-            accession_number = filing_metadata.get('accession_number', '')
-
-            # For PoC: Generate realistic transaction based on real filing metadata
-            import random
-
-            # Realistic insider profiles for major companies
-            insider_profiles = [
-                ('Chief Executive Officer', 2),
-                ('Chief Financial Officer', 3),
-                ('Chief Technology Officer', 2),
-                ('Chief Operating Officer', 3),
-                ('Director', 1),
-                ('Executive Vice President', 2)
-            ]
-
-            title, expected_score = random.choice(insider_profiles)
-
-            # Generate realistic names
-            first_names = ['Timothy', 'Satya', 'Jensen', 'Elon', 'Sundar', 'Amy', 'Colette', 'Ruth']
-            last_names = ['Cook', 'Nadella', 'Huang', 'Musk', 'Pichai', 'Hood', 'Kress', 'Porat']
-            insider_name = f"{random.choice(first_names)} {random.choice(last_names)}"
-
-            # Realistic transaction sizes based on company size
-            if ticker in ['AAPL', 'MSFT', 'GOOGL']:  # Mega-cap
-                shares_traded = random.randint(1000, 25000)
-                price_per_share = random.uniform(150, 300)
-            elif ticker in ['NVDA', 'TSLA']:  # Large growth
-                shares_traded = random.randint(500, 15000)
-                price_per_share = random.uniform(200, 500)
-            else:
-                shares_traded = random.randint(100, 10000)
-                price_per_share = random.uniform(50, 200)
-
-            total_value = shares_traded * price_per_share
-
-            # Only include transactions that meet our $50k minimum filter
-            if total_value < 50000:
-                return None
-
-            filing_id = f"REAL_{ticker}_{insider_name.replace(' ', '_')}_{filing_date}_{accession_number}"
-            filing_id = re.sub(r'[^\w\-_.]', '', filing_id)
-
-            return InsiderFiling(
-                filing_id=filing_id,
-                company_symbol=ticker,
-                company_name=f"{ticker} Inc",  # Will be enhanced in Phase 2
-                company_cik=cik,
-                insider_name=insider_name,
-                insider_title=title,
-                transaction_date=filing_date,
-                transaction_code='P',  # Purchase
-                shares_traded=float(shares_traded),
-                price_per_share=round(price_per_share, 2),
-                total_value=round(total_value, 2),
-                ownership_type=random.choice(['D', 'I']),
-                shares_owned_after=shares_traded * random.uniform(5, 20),
-                filing_date=filing_date,
-                is_first_time_purchase=False,
-                raw_filing_data=json.dumps({
-                    'source': 'sec_historical_real_metadata',
-                    'accession_number': accession_number,
-                    'document_url': filing_metadata.get('document_url', ''),
-                    'content_preview': raw_content[:500] if raw_content else '',
-                    'phase': 'Production_real_XML_parsing'
-                })
-            )
-
-        except Exception as e:
-            self.logger.error(f"Error creating structured filing: {e}")
-            return None
 
     def _find_raw_form4_xml(self, filing_metadata: Dict) -> List[str]:
         """
@@ -464,39 +447,51 @@ class SECHistoricalLoader:
 
                     self.logger.info(f"      💰 Transaction: {transaction_code} {shares_traded:,.0f} shares @ ${price_per_share:.2f}")
 
-                    # Only include transactions that meet our criteria
+                    # Apply insider trading strategy filters
                     total_value = shares_traded * price_per_share
-                    if total_value >= 50000:  # $50k minimum filter
 
-                        filing_id = f"REAL_XML_{ticker}_{insider_name.replace(' ', '_')}_{transaction_date}_{accession_number}"
-                        filing_id = re.sub(r'[^\w\-_.]', '', filing_id)
+                    # Filter 1: Only Purchase transactions (exclude gifts, options, etc.)
+                    if transaction_code != 'P':
+                        self.logger.info(f"      ⏭️ Skipping non-purchase transaction: {transaction_code} (we only track purchases 'P')")
+                        continue
 
-                        filing = InsiderFiling(
-                            filing_id=filing_id,
-                            company_symbol=ticker,
-                            company_name=issuer_name,
-                            company_cik=cik,
-                            insider_name=insider_name,
-                            insider_title=insider_title,
-                            transaction_date=transaction_date,
-                            transaction_code=transaction_code,
-                            shares_traded=shares_traded,
-                            price_per_share=round(price_per_share, 2),
-                            total_value=round(total_value, 2),
-                            ownership_type=ownership_type,
-                            shares_owned_after=shares_owned_after,
-                            filing_date=filing_date,
-                            is_first_time_purchase=False,
-                            raw_filing_data=json.dumps({
-                                'source': 'sec_historical_real_xml_parsed',
-                                'accession_number': accession_number,
-                                'xml_content_length': len(xml_content),
-                                'phase': 'Phase_2_real_xml_parsing'
-                            })
-                        )
+                    # Filter 2: Minimum transaction value ($50k filter)
+                    if total_value < 50000:
+                        self.logger.info(f"      ⏭️ Skipping small transaction: ${total_value:,.0f} (minimum: $50,000)")
+                        continue
 
-                        filings.append(filing)
-                        self.logger.info(f"      ✅ Parsed transaction: {transaction_code} {shares_traded:,.0f} shares @ ${price_per_share:.2f}")
+                    # Transaction meets all criteria - include it
+                    self.logger.info(f"      ✅ Transaction qualifies: {transaction_code} ${total_value:,.0f}")
+
+                    filing_id = f"REAL_XML_{ticker}_{insider_name.replace(' ', '_')}_{transaction_date}_{accession_number}"
+                    filing_id = re.sub(r'[^\w\-_.]', '', filing_id)
+
+                    filing = InsiderFiling(
+                        filing_id=filing_id,
+                        company_symbol=ticker,
+                        company_name=issuer_name,
+                        company_cik=cik,
+                        insider_name=insider_name,
+                        insider_title=insider_title,
+                        transaction_date=transaction_date,
+                        transaction_code=transaction_code,
+                        shares_traded=shares_traded,
+                        price_per_share=round(price_per_share, 2),
+                        total_value=round(total_value, 2),
+                        ownership_type=ownership_type,
+                        shares_owned_after=shares_owned_after,
+                        filing_date=filing_date,
+                        is_first_time_purchase=False,
+                        raw_filing_data=json.dumps({
+                            'source': 'sec_historical_real_xml_parsed',
+                            'accession_number': accession_number,
+                            'xml_content_length': len(xml_content),
+                            'phase': 'Phase_2_real_xml_parsing'
+                        })
+                    )
+
+                    filings.append(filing)
+                    self.logger.info(f"      ✅ Parsed transaction: {transaction_code} {shares_traded:,.0f} shares @ ${price_per_share:.2f}")
 
             return filings
 

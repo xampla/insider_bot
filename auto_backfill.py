@@ -6,7 +6,7 @@ Automatically detects and fills database gaps when the bot restarts.
 
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import sqlite3
 
 from database_manager import DatabaseManager, InsiderFiling
@@ -49,8 +49,9 @@ class AutoBackfillManager:
         # Initialize tier system
         self._init_company_tiers()
 
-        # Start conservative: Tier 1 + select Tier 2 companies
-        target_list = self.tier1_companies + self.tier2_companies[:5]
+        # Activate ALL companies across all tiers for comprehensive coverage
+        target_list = (self.tier1_companies + self.tier2_companies +
+                      self.tier3_companies + self.tier4_companies)
 
         self.logger.info(f"📊 Enhanced Company Tier System Initialized:")
         self.logger.info(f"   🔥 Tier 1 (Mega-caps): {len(self.tier1_companies)} companies")
@@ -58,12 +59,13 @@ class AutoBackfillManager:
         self.logger.info(f"   🟢 Tier 3 (Mid-caps + Quality): {len(self.tier3_companies)} companies")
         self.logger.info(f"   🔴 Tier 4 (Small-cap Sandbox): {len(self.tier4_companies)} companies")
         self.logger.info(f"")
-        self.logger.info(f"🎯 Currently Active: {len(target_list)} companies")
-        self.logger.info(f"   Active List: {target_list}")
+        self.logger.info(f"🎯 Currently Active: {len(target_list)} companies (ALL TIERS ACTIVATED)")
+        self.logger.info(f"   Tier 1 Active: {self.tier1_companies}")
+        self.logger.info(f"   Tier 2 Active: {self.tier2_companies}")
+        self.logger.info(f"   Tier 3 Active: {self.tier3_companies}")
+        self.logger.info(f"   Tier 4 Active: {self.tier4_companies}")
         self.logger.info(f"")
-        self.logger.info(f"📈 Expansion Path:")
-        self.logger.info(f"   Next: Add Tier 3 after ≥2 profitable months + no >15% drawdown")
-        self.logger.info(f"   Future: Optional Tier 4 for experimental small-cap trades")
+        self.logger.info(f"⚠️  Risk Management: Tier 4 companies use 0.25x position sizing + strict limits")
 
         return target_list
 
@@ -553,9 +555,10 @@ class AutoBackfillManager:
         self.logger.info(f"🔄 Starting backfill process...")
         self.logger.info(f"   Period: {start_date} to {end_date}")
         self.logger.info(f"   Companies: {self.target_companies}")
+        self.logger.info(f"   ⚠️  Press Ctrl+C to interrupt if needed")
 
         try:
-            # Load historical data
+            # Load historical data (with interruption awareness)
             filings = self.sec_loader.load_historical_data(
                 start_date=start_date,
                 end_date=end_date,
