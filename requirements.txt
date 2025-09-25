@@ -1,7 +1,7 @@
 aiohappyeyeballs==2.6.1
 aiohttp==3.12.15
 aiosignal==1.4.0
-alpaca-trade-api==0.48
+alpaca-py
 alpha_vantage==3.0.0
 asyncio-nats-client==0.11.5
 attrs==25.3.0
