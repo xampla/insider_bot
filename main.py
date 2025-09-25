@@ -459,7 +459,7 @@ class InsiderTradingBot:
                     # Apply combined risk adjustments: SPY filter × Tier 4 multiplier
                     combined_risk_multiplier = spy_risk_multiplier * tier_risk_multiplier
                     if combined_risk_multiplier < 1.0:
-                        shares = int(shares * combined_risk_multiplier)
+                        shares = round(shares * combined_risk_multiplier, 6)  # Maintain Alpaca's 6-decimal precision
                         adjustment_reasons = []
                         if spy_risk_multiplier < 1.0:
                             adjustment_reasons.append(f"SPY: {spy_risk_multiplier*100:.0f}%")

@@ -1,0 +1,42 @@
+[Unit]
+Description=Insider Trading Bot - Automated SEC Form 4 Analysis
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/insider_bot
+Environment=PATH=/home/ubuntu/insider_bot/insider_bot_env/bin
+ExecStart=/home/ubuntu/insider_bot/insider_bot_env/bin/python main.py
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutSec=30
+
+# Restart configuration
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/ubuntu/insider_bot
+PrivateTmp=yes
+
+# Logging
+StandardOutput=append:/home/ubuntu/insider_bot/logs/service.log
+StandardError=append:/home/ubuntu/insider_bot/logs/service.log
+SyslogIdentifier=insider-bot
+
+# Resource limits
+MemoryLimit=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

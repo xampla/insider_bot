@@ -920,7 +920,7 @@ class AlpacaTrader:
 
     def calculate_position_size(self, symbol: str, strategy_score: int,
                               current_price: float, market_data: MarketData = None,
-                              stop_variant: int = 1, cluster_details: dict = None) -> int:
+                              stop_variant: int = 1, cluster_details: dict = None) -> float:
         """
         Calculate position size using enhanced risk-first approach
 
@@ -1014,24 +1014,24 @@ class AlpacaTrader:
                 # Fallback to conservative sizing if ATR is invalid
                 target_position_value = risk_amount / 0.024  # Assume 2.4% stop (PDF average)
 
-            # Calculate shares
-            shares = int(target_position_value / current_price)
+            # Calculate shares with fractional precision (Alpaca supports up to 6 decimals)
+            shares = round(target_position_value / current_price, 6)
 
             # Safety checks
-            # Ensure we don't exceed buying power
+            # Ensure we don't exceed buying power with fractional precision
             actual_cost = shares * current_price
             if actual_cost > buying_power * 0.95:  # Leave 5% buffer
-                shares = int((buying_power * 0.95) / current_price)
+                shares = round((buying_power * 0.95) / current_price, 6)
                 actual_cost = shares * current_price
 
-            # Ensure minimum position (at least $100 for meaningful trades)
-            if actual_cost < 100:
-                shares = max(1, int(100 / current_price))
+            # Ensure minimum position (at least $2 for meaningful trades)
+            if actual_cost < 2:
+                shares = max(round(2 / current_price, 6), 0.000001)  # Alpaca minimum
                 actual_cost = shares * current_price
 
-            # Ensure we can afford the position
+            # Ensure we can afford the position with fractional precision
             if actual_cost > buying_power:
-                shares = int(buying_power / current_price)
+                shares = round(buying_power / current_price, 6)
                 actual_cost = shares * current_price
 
             # Calculate actual risk percentage
@@ -1046,14 +1046,114 @@ class AlpacaTrader:
             self.logger.info(f"  Actual risk: ${actual_risk_amount:.2f} ({actual_risk_percent:.2f}%)")
             self.logger.info(f"  Stop loss: ${stop_loss_price:.2f}")
 
-            return max(1, shares)  # At least 1 share
+            return max(0.000001, shares)  # At least Alpaca minimum fractional
 
         except Exception as e:
             self.logger.error(f"Error calculating risk-first position size: {e}")
             # Fallback to conservative position
-            return max(1, int(1000 / current_price))  # $1000 fallback position
+            return max(0.000001, round(1000 / current_price, 6))  # $1000 fallback with fractional
 
-    def place_buy_order(self, symbol: str, shares: int, strategy_score: int,
+    def optimize_capital_allocation(self, signal_list: list, telegram_notifier=None) -> dict:
+        """
+        Optimize capital allocation when multiple signals exceed available buying power
+
+        Args:
+            signal_list: List of trading signals with position sizes
+            telegram_notifier: Telegram notifier for user alerts
+
+        Returns:
+            dict: Allocation results with optimized positions and notifications
+        """
+        try:
+            account = self.trading_client.get_account()
+            available_capital = float(account.buying_power) * 0.95  # 5% buffer
+
+            # Calculate total requested capital
+            total_requested = sum(signal['shares'] * signal['current_price'] for signal in signal_list)
+
+            if total_requested <= available_capital:
+                # No allocation conflict
+                return {
+                    'allocation_needed': False,
+                    'optimized_signals': signal_list,
+                    'message': f"All {len(signal_list)} signals fit within ${available_capital:,.0f} buying power"
+                }
+
+            # Allocation needed - prioritize by strategy_score and optimize fractional usage
+            sorted_signals = sorted(signal_list, key=lambda x: x['strategy_score'], reverse=True)
+            optimized_signals = []
+            remaining_capital = available_capital
+            skipped_signals = []
+
+            self.logger.warning(f"⚠️ Capital allocation needed: ${total_requested:,.0f} requested > ${available_capital:,.0f} available")
+
+            for signal in sorted_signals:
+                signal_cost = signal['shares'] * signal['current_price']
+
+                if signal_cost <= remaining_capital:
+                    # Signal fits - take it as-is
+                    optimized_signals.append(signal)
+                    remaining_capital -= signal_cost
+                    self.logger.info(f"✅ Allocated: {signal['symbol']} - {signal['shares']:.6f} shares @ ${signal['current_price']:.2f} = ${signal_cost:.2f}")
+
+                elif remaining_capital >= 2:  # Minimum $2 position
+                    # Partial allocation with fractional shares
+                    fractional_shares = round(remaining_capital / signal['current_price'], 6)
+                    if fractional_shares >= 0.000001:  # Alpaca minimum
+                        optimized_signal = signal.copy()
+                        optimized_signal['shares'] = fractional_shares
+                        optimized_signal['original_shares'] = signal['shares']
+                        optimized_signal['allocation_type'] = 'partial'
+
+                        optimized_signals.append(optimized_signal)
+                        actual_cost = fractional_shares * signal['current_price']
+                        remaining_capital -= actual_cost
+
+                        self.logger.info(f"📉 Partial allocation: {signal['symbol']} - {fractional_shares:.6f}/{signal['shares']:.6f} shares = ${actual_cost:.2f}")
+                    else:
+                        skipped_signals.append(signal)
+                else:
+                    # Skip signal - insufficient capital
+                    skipped_signals.append(signal)
+                    self.logger.warning(f"❌ Skipped: {signal['symbol']} - insufficient capital (${remaining_capital:.2f} remaining)")
+
+            # Send Telegram notification
+            if telegram_notifier and telegram_notifier.enabled:
+                allocated_count = len(optimized_signals)
+                skipped_count = len(skipped_signals)
+                capital_used = available_capital - remaining_capital
+
+                notification = (
+                    f"🚨 CAPITAL ALLOCATION ALERT\n"
+                    f"📊 {len(signal_list)} signals detected, ${total_requested:,.0f} requested\n"
+                    f"💰 Available: ${available_capital:,.0f}\n"
+                    f"✅ Allocated: {allocated_count} positions (${capital_used:,.0f})\n"
+                    f"❌ Skipped: {skipped_count} positions\n"
+                    f"💵 Remaining: ${remaining_capital:,.0f}"
+                )
+
+                if any(s.get('allocation_type') == 'partial' for s in optimized_signals):
+                    notification += f"\n⚠️ Some positions reduced to fit budget"
+
+                telegram_notifier.notify_system_status("capital_allocation", notification)
+
+            return {
+                'allocation_needed': True,
+                'optimized_signals': optimized_signals,
+                'skipped_signals': skipped_signals,
+                'capital_utilization': ((available_capital - remaining_capital) / available_capital) * 100,
+                'message': f"Optimized {len(optimized_signals)}/{len(signal_list)} signals within budget"
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error optimizing capital allocation: {e}")
+            return {
+                'allocation_needed': False,
+                'optimized_signals': signal_list,
+                'error': str(e)
+            }
+
+    def place_buy_order(self, symbol: str, shares: float, strategy_score: int,
                        filing_id: str, stop_variant: int = 1,
                        take_profit_variant: int = 1) -> Optional[TradeRecord]:
         """
@@ -1087,15 +1187,8 @@ class AlpacaTrader:
 
             current_price = market_data.close_price
 
-            # Re-calculate position size using risk-first approach
-            recalculated_shares = self.calculate_position_size(
-                symbol, strategy_score, current_price, market_data, stop_variant
-            )
-
-            # Use recalculated shares if different from input
-            if abs(recalculated_shares - shares) > shares * 0.1:  # >10% difference
-                self.logger.info(f"Using risk-adjusted position size: {recalculated_shares} vs {shares}")
-                shares = recalculated_shares
+            # Trust the position size calculated in main.py with fractional precision
+            # (Removed redundant recalculation to streamline workflow)
 
             position_value = shares * current_price
 
@@ -1155,14 +1248,14 @@ class AlpacaTrader:
                 take_profit_price = current_price + (market_data.atr_14 * tp_multiplier)
                 take_profit_description += f" (Earnings Adjusted: {tp_multiplier*100:.0f}% ATR)"
 
-            # Place market buy order
-            order = self.trading_client.submit_order(
+            # Place market buy order using proper MarketOrderRequest
+            market_order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=shares,
-                side='buy',
-                type='market',
-                time_in_force='day'
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY
             )
+            order = self.trading_client.submit_order(order_data=market_order_data)
 
             # Create enhanced trade record with PDF strategy details
             trade_id = f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1205,7 +1298,7 @@ class AlpacaTrader:
             self.logger.error(f"Error placing PDF-compliant buy order for {symbol}: {e}")
             return None
 
-    def place_sell_order(self, symbol: str, shares: int, reason: str = "MANUAL") -> bool:
+    def place_sell_order(self, symbol: str, shares: float, reason: str = "MANUAL") -> bool:
         """
         Place a sell order to close a position
 
@@ -1218,13 +1311,14 @@ class AlpacaTrader:
             True if order placed successfully
         """
         try:
-            order = self.trading_client.submit_order(
+            # Place market sell order using proper MarketOrderRequest
+            market_order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=shares,
-                side='sell',
-                type='market',
-                time_in_force='day'
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY
             )
+            order = self.trading_client.submit_order(order_data=market_order_data)
 
             self.logger.info(f"Sell order placed for {symbol}: {shares} shares - {reason}")
             return True
